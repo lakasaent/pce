@@ -37,5 +37,5 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::590807097490:role/PceCICDDeployRole
-          aws-region: af-south-1
+          aws-region: eu-north-1
       - run: pnpm -w --filter infra cdk synth
