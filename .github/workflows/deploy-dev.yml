@@ -1,0 +1,70 @@
+name: Deploy PCE App (dev)
+
+on:
+  push:
+    branches: [ "main" ]            # or your branch
+    paths:
+      - "packages/infra/**"
+      - ".github/workflows/deploy-dev.yml"
+
+permissions:
+  id-token: write   # OIDC
+  contents: read
+
+env:
+  AWS_REGION: eu-north-1
+  PCE_STAGE: dev
+  PCE_ECR_REPO_NAME: pce-api-dev
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::590807097490:role/pce-dev-ci   # paste $ciRoleArn if different
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Node & pnpm
+        uses: actions/setup-node@v4
+        with: { node-version: "20" }
+      - run: corepack enable && corepack prepare pnpm@9 --activate
+
+      - name: Resolve digest for tag
+        id: digest
+        run: |
+          # Choose a tag scheme; here we use the short SHA
+          TAG="${GITHUB_SHA::12}"
+          # fallback to a known tag if digest isn’t found
+          FALLBACK="dev-20250915-231431"
+          DIGEST=$(aws ecr describe-images \
+            --repository-name "$PCE_ECR_REPO_NAME" \
+            --image-ids imageTag="$TAG" \
+            --query "imageDetails[0].imageDigest" --output text || true)
+          if [ -z "$DIGEST" ] || [ "$DIGEST" = "None" ]; then
+            echo "No digest for $TAG; falling back to $FALLBACK"
+            TAG="$FALLBACK"
+            DIGEST=$(aws ecr describe-images \
+              --repository-name "$PCE_ECR_REPO_NAME" \
+              --image-ids imageTag="$TAG" \
+              --query "imageDetails[0].imageDigest" --output text)
+          fi
+          echo "PCE_IMAGE_TAG=$TAG" >> $GITHUB_ENV
+          echo "PCE_IMAGE_DIGEST=$DIGEST" >> $GITHUB_ENV
+          echo "Resolved digest: $DIGEST"
+
+      - name: CDK Deploy (digest pinned)
+        working-directory: packages/infra
+        run: |
+          export CDK_DEFAULT_REGION="$AWS_REGION"
+          export CDK_DEFAULT_ACCOUNT="590807097490"
+          export PCE_STAGE="dev"
+          # Pull current ECS ServiceName from CFN
+          SVC=$(aws cloudformation describe-stacks --stack-name PceApp-dev \
+            --query "Stacks[0].Outputs[?OutputKey=='ServiceName'].OutputValue" --output text)
+          export PCE_SERVICE_NAME="$SVC"
+          pnpm run synth
+          pnpm run deploy:app:immutable
