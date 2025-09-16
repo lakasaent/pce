@@ -19,7 +19,7 @@ jobs:
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::590807097490:role/PceAppDev-GitHubOIDC
+          role-to-assume: arn:aws:iam::590807097490:role/pce-dev-ci
           aws-region: eu-north-1
       - run: echo "✅ CI wiring OK – starting synth"
       - run: pnpm install --frozen-lockfile
