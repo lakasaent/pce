@@ -1,29 +1,40 @@
 name: CI
+
 on:
   push:
-    branches: [main]
+    branches: [ "main" ]
   pull_request:
 
 permissions:
-  id-token: write
-  contents: read
+  id-token: write   # for GitHub OIDC → AWS
+  contents: read    # checkout code
 
 jobs:
   cdk-synth:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::590807097490:role/pce-dev-ci
           aws-region: eu-north-1
+
+      # 🔍 Verify AWS auth
+      - name: Verify AWS Credentials
+        run: aws sts get-caller-identity
+
       - run: echo "✅ CI wiring OK – starting synth"
+
       - run: pnpm install --frozen-lockfile
+
       - run: pnpm --filter @pce/infra run cdk synth
+
       - uses: actions/upload-artifact@v4
         with:
           name: cdk-template
@@ -34,54 +45,79 @@ jobs:
     needs: cdk-synth
     steps:
       - uses: actions/checkout@v4
-      - uses: aws-actions/configure-aws-credentials@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::590807097490:role/PceAppDev-GitHubOIDC
+          role-to-assume: arn:aws:iam::590807097490:role/pce-dev-ci
           aws-region: eu-north-1
+
       - name: Resolve latest ECR digest
         id: digest
         run: |
           set -e
           DIGEST=$(aws ecr describe-images \
             --repository-name pce-api-dev \
-            --query 'sort_by(imageDetails,& imagePushedAt)[-1].imageDigest' \
-            --output text) || { echo "❌ Error fetching digest"; exit 1; }
-          echo "PCE_IMAGE_DIGEST=$DIGEST" >> $GITHUB_ENV
-          echo "✅ Resolved digest: $DIGEST"
+            --query 'sort_by(imageDetails,& imagePushedAt)[-1].[imageTag,imageDigest]' \
+            --output table)
+          echo "$DIGEST"
+          echo "PCE_IMAGE_DIGEST=$(echo $DIGEST | awk '{print $2}')" >> $GITHUB_ENV
+          echo "PCE_IMAGE_TAG=$(echo $DIGEST | awk '{print $1}')" >> $GITHUB_ENV
+
     outputs:
       digest: ${{ env.PCE_IMAGE_DIGEST }}
+      tag: ${{ env.PCE_IMAGE_TAG }}
 
   deploy:
     runs-on: ubuntu-latest
     needs: resolve-digest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - uses: aws-actions/configure-aws-credentials@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::590807097490:role/PceAppDev-GitHubOIDC
+          role-to-assume: arn:aws:iam::590807097490:role/pce-dev-ci
           aws-region: eu-north-1
+
+      # 🔍 Verify AWS auth again
+      - name: Verify AWS Credentials
+        run: aws sts get-caller-identity
+
       - run: pnpm install --frozen-lockfile
+
       - uses: actions/download-artifact@v4
         with:
           name: cdk-template
           path: cdk.out
-      - name: Deploy CDK Stack
+
+      - name: CDK Deploy
+        working-directory: packages/infra
         run: |
           set -e
-          pnpm --filter @pce/infra run cdk deploy PceApp-dev \
-            --require-approval never \
-            -c stage=dev \
+          export CDK_DEFAULT_REGION="eu-north-1"
+          export CDK_DEFAULT_ACCOUNT="590807097490"
+          export PCE_STAGE="dev"
+          SVC=$(aws cloudformation describe-stacks \
+            --stack-name PceApp-dev \
+            --query "Stacks[0].Outputs[?OutputKey=='ServiceName'].OutputValue" \
+            --output text || true)
+          export PCE_SERVICE_NAME="$SVC"
+          echo "Deploying with digest=${{ env.PCE_IMAGE_DIGEST }} and tag=${{ env.PCE_IMAGE_TAG }}"
+          pnpm run deploy:app:immutable \
+            -c stage=$PCE_STAGE \
             -c vpcId=${{ secrets.PCE_VPC_ID }} \
             -c taskSecurityGroupId=${{ secrets.PCE_TASK_SG_ID }} \
             -c clusterName=pce-dev-cluster \
             -c ecrRepoName=pce-api-dev \
             -c imageDigest=${{ env.PCE_IMAGE_DIGEST }} \
-            -c imageTag=dev-$(date +%Y%m%d-%H%M%S) \
-            -c snsTopicArn=${{ secrets.PCE_SNS_TOPIC_ARN }} \
-          || { echo "❌ CDK deploy failed"; exit 1; }
+            -c imageTag=${{ env.PCE_IMAGE_TAG }} \
+            -c snsTopicArn=${{ secrets.PCE_SNS_TOPIC_ARN }}
+
       - name: Verify ECS Service
         run: |
           set -e
