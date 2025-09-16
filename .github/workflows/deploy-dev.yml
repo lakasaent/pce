@@ -16,6 +16,8 @@ env:
   PCE_STAGE: dev
   PCE_ECR_REPO_NAME: pce-api-dev
 
+role-to-assume: arn:aws:iam::590807097490:role/pce-dev-ci
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
