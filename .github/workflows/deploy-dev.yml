@@ -29,10 +29,7 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Verify AWS Credentials
-        run: aws sts get-caller-identity || { echo "❌ Failed to assume role"; exit 1; }
-
-      - name: Verify AWS Role Arn
-        run: aws iam get-role --role-name pce-dev-ci --query "Role.Arn" --output text
+        run: aws sts get-caller-identity
 
       - name: Setup Node & pnpm
         uses: actions/setup-node@v4
@@ -62,18 +59,14 @@ jobs:
           fi
           echo "PCE_IMAGE_TAG=$TAG" >> $GITHUB_ENV
           echo "PCE_IMAGE_DIGEST=$DIGEST" >> $GITHUB_ENV
-
-      - name: Show resolved image
-        run: |
-          echo "✅ Using image tag: $PCE_IMAGE_TAG"
-          echo "✅ Using image digest: $PCE_IMAGE_DIGEST"
+          echo "✅ Using image: $TAG ($DIGEST)"
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
       - name: CDK Synth
         working-directory: packages/infra
-        run: pnpm run synth 2>&1 || { echo "❌ CDK synth failed"; exit 1; }
+        run: pnpm run synth
 
       - name: CDK Deploy (digest pinned)
         working-directory: packages/infra
@@ -84,7 +77,7 @@ jobs:
           export PCE_STAGE="dev"
           SVC=$(aws cloudformation describe-stacks --stack-name PceApp-dev \
             --query "Stacks[0].Outputs[?OutputKey=='ServiceName'].OutputValue" \
-            --output text 2>&1) || { echo "❌ Error fetching service name: $SVC"; exit 1; }
+            --output text 2>&1)
           if [ -z "$SVC" ] || [ "$SVC" = "None" ]; then
             echo "❌ No ECS Service found in CloudFormation outputs"
             exit 1
@@ -99,7 +92,7 @@ jobs:
             -c ecrRepoName=$PCE_ECR_REPO_NAME \
             -c imageDigest=$PCE_IMAGE_DIGEST \
             -c imageTag=$PCE_IMAGE_TAG \
-            -c snsTopicArn=${{ secrets.PCE_SNS_TOPIC_ARN }} 2>&1 || { echo "❌ CDK deploy failed"; exit 1; }
+            -c snsTopicArn=${{ secrets.PCE_SNS_TOPIC_ARN }}
 
       - name: Verify ECS Service
         run: |
@@ -107,13 +100,41 @@ jobs:
           SERVICE_NAME=$(aws cloudformation describe-stacks \
             --stack-name PceApp-dev \
             --query 'Stacks[0].Outputs[?OutputKey==`ServiceName`].OutputValue' \
-            --output text 2>&1) || { echo "❌ Error fetching service name: $SERVICE_NAME"; exit 1; }
-          if [ -z "$SERVICE_NAME" ] || [ "$SERVICE_NAME" = "None" ]; then
-            echo "❌ No ECS Service found to verify"
-            exit 1
-          fi
+            --output text 2>&1)
           aws ecs describe-services \
             --cluster pce-dev-cluster \
             --services $SERVICE_NAME \
             --query "services[0].{Status:status,RunningCount:runningCount,DesiredCount:desiredCount}" \
-            --output json 2>&1 || { echo "❌ Error describing service"; exit 1; }
+            --output json
+
+      # ---------- EXTRA DEBUGGING STEPS ----------
+      - name: Debug: List ECS Services
+        if: always()
+        run: aws ecs list-services --cluster pce-dev-cluster --output table
+
+      - name: Debug: CloudFormation Outputs
+        if: always()
+        run: aws cloudformation describe-stacks --stack-name PceApp-dev --output table
+
+      - name: Debug: Service Events
+        if: always()
+        run: |
+          SERVICE_NAME=$(aws cloudformation describe-stacks \
+            --stack-name PceApp-dev \
+            --query 'Stacks[0].Outputs[?OutputKey==`ServiceName`].OutputValue' \
+            --output text)
+          aws ecs describe-services \
+            --cluster pce-dev-cluster \
+            --services $SERVICE_NAME \
+            --query "services[0].events" \
+            --output table
+
+      - name: Debug: Stopped Tasks
+        if: always()
+        run: |
+          TASKS=$(aws ecs list-tasks --cluster pce-dev-cluster --desired-status STOPPED --output json | jq -r '.taskArns[]?')
+          if [ -n "$TASKS" ]; then
+            aws ecs describe-tasks --cluster pce-dev-cluster --tasks $TASKS --query "tasks[].{TaskArn:taskArn,StoppedReason:stoppedReason,ContainerReason:containers[0].reason}" --output table
+          else
+            echo "✅ No stopped tasks found"
+          fi
