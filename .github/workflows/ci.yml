@@ -6,8 +6,8 @@ on:
   pull_request:
 
 permissions:
-  id-token: write   # for GitHub OIDC → AWS
-  contents: read    # checkout code
+  id-token: write   # for OIDC
+  contents: read
 
 jobs:
   cdk-synth:
@@ -19,114 +19,31 @@ jobs:
         with:
           node-version: 20
 
-      - name: Configure AWS Credentials
+      - name: Configure AWS (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::590807097490:role/pce-dev-ci
           aws-region: eu-north-1
 
-      # 🔍 Verify AWS auth
       - name: Verify AWS Credentials
         run: aws sts get-caller-identity
 
+      # 🔑 Fix: Install and enable pnpm
+      - name: Setup pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@9 --activate
+          pnpm --version
+
       - run: echo "✅ CI wiring OK – starting synth"
 
-      - run: pnpm install --frozen-lockfile
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
 
-      - run: pnpm --filter @pce/infra run cdk synth
+      - name: CDK Synth
+        run: pnpm --filter @pce/infra run cdk synth
 
       - uses: actions/upload-artifact@v4
         with:
           name: cdk-template
           path: cdk.out/PceApp-dev.template.json
-
-  resolve-digest:
-    runs-on: ubuntu-latest
-    needs: cdk-synth
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: arn:aws:iam::590807097490:role/pce-dev-ci
-          aws-region: eu-north-1
-
-      - name: Resolve latest ECR digest
-        id: digest
-        run: |
-          set -e
-          DIGEST=$(aws ecr describe-images \
-            --repository-name pce-api-dev \
-            --query 'sort_by(imageDetails,& imagePushedAt)[-1].[imageTag,imageDigest]' \
-            --output table)
-          echo "$DIGEST"
-          echo "PCE_IMAGE_DIGEST=$(echo $DIGEST | awk '{print $2}')" >> $GITHUB_ENV
-          echo "PCE_IMAGE_TAG=$(echo $DIGEST | awk '{print $1}')" >> $GITHUB_ENV
-
-    outputs:
-      digest: ${{ env.PCE_IMAGE_DIGEST }}
-      tag: ${{ env.PCE_IMAGE_TAG }}
-
-  deploy:
-    runs-on: ubuntu-latest
-    needs: resolve-digest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: arn:aws:iam::590807097490:role/pce-dev-ci
-          aws-region: eu-north-1
-
-      # 🔍 Verify AWS auth again
-      - name: Verify AWS Credentials
-        run: aws sts get-caller-identity
-
-      - run: pnpm install --frozen-lockfile
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: cdk-template
-          path: cdk.out
-
-      - name: CDK Deploy
-        working-directory: packages/infra
-        run: |
-          set -e
-          export CDK_DEFAULT_REGION="eu-north-1"
-          export CDK_DEFAULT_ACCOUNT="590807097490"
-          export PCE_STAGE="dev"
-          SVC=$(aws cloudformation describe-stacks \
-            --stack-name PceApp-dev \
-            --query "Stacks[0].Outputs[?OutputKey=='ServiceName'].OutputValue" \
-            --output text || true)
-          export PCE_SERVICE_NAME="$SVC"
-          echo "Deploying with digest=${{ env.PCE_IMAGE_DIGEST }} and tag=${{ env.PCE_IMAGE_TAG }}"
-          pnpm run deploy:app:immutable \
-            -c stage=$PCE_STAGE \
-            -c vpcId=${{ secrets.PCE_VPC_ID }} \
-            -c taskSecurityGroupId=${{ secrets.PCE_TASK_SG_ID }} \
-            -c clusterName=pce-dev-cluster \
-            -c ecrRepoName=pce-api-dev \
-            -c imageDigest=${{ env.PCE_IMAGE_DIGEST }} \
-            -c imageTag=${{ env.PCE_IMAGE_TAG }} \
-            -c snsTopicArn=${{ secrets.PCE_SNS_TOPIC_ARN }}
-
-      - name: Verify ECS Service
-        run: |
-          set -e
-          SERVICE_NAME=$(aws cloudformation describe-stacks \
-            --stack-name PceApp-dev \
-            --query 'Stacks[0].Outputs[?OutputKey==`ServiceName`].OutputValue' \
-            --output text)
-          aws ecs describe-services \
-            --cluster pce-dev-cluster \
-            --services $SERVICE_NAME \
-            --query "services[0].{Status:status,RunningCount:runningCount,DesiredCount:desiredCount}" \
-            --output json
