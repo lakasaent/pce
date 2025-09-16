@@ -2,21 +2,20 @@ name: Deploy PCE App (dev)
 
 on:
   push:
-    branches: [ "main" ]            # or your branch
+    branches:
+      - "main" # or your branch
     paths:
       - "packages/infra/**"
       - ".github/workflows/deploy-dev.yml"
 
 permissions:
-  id-token: write   # OIDC
+  id-token: write # OIDC
   contents: read
 
 env:
   AWS_REGION: eu-north-1
   PCE_STAGE: dev
   PCE_ECR_REPO_NAME: pce-api-dev
-
-role-to-assume: arn:aws:iam::590807097490:role/pce-dev-ci
 
 jobs:
   deploy:
@@ -27,12 +26,13 @@ jobs:
       - name: Configure AWS (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::590807097490:role/pce-dev-ci   # paste $ciRoleArn if different
+          role-to-assume: arn:aws:iam::590807097490:role/pce-dev-ci
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Setup Node & pnpm
         uses: actions/setup-node@v4
-        with: { node-version: "20" }
+        with:
+          node-version: "20"
       - run: corepack enable && corepack prepare pnpm@9 --activate
 
       - name: Resolve digest for tag
