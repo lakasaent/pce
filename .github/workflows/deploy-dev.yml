@@ -35,7 +35,10 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "20"
-      - run: corepack enable && corepack prepare pnpm@9 --activate
+      - run: |
+          corepack enable
+          corepack prepare pnpm@9 --activate
+          pnpm --version   # 🔍 confirm pnpm is available
 
       - name: Resolve digest for tag
         id: digest
@@ -107,34 +110,7 @@ jobs:
             --query "services[0].{Status:status,RunningCount:runningCount,DesiredCount:desiredCount}" \
             --output json
 
-      # ---------- EXTRA DEBUGGING STEPS ----------
+      # 🔍 Debug steps
       - name: Debug: List ECS Services
         if: always()
         run: aws ecs list-services --cluster pce-dev-cluster --output table
-
-      - name: Debug: CloudFormation Outputs
-        if: always()
-        run: aws cloudformation describe-stacks --stack-name PceApp-dev --output table
-
-      - name: Debug: Service Events
-        if: always()
-        run: |
-          SERVICE_NAME=$(aws cloudformation describe-stacks \
-            --stack-name PceApp-dev \
-            --query 'Stacks[0].Outputs[?OutputKey==`ServiceName`].OutputValue' \
-            --output text)
-          aws ecs describe-services \
-            --cluster pce-dev-cluster \
-            --services $SERVICE_NAME \
-            --query "services[0].events" \
-            --output table
-
-      - name: Debug: Stopped Tasks
-        if: always()
-        run: |
-          TASKS=$(aws ecs list-tasks --cluster pce-dev-cluster --desired-status STOPPED --output json | jq -r '.taskArns[]?')
-          if [ -n "$TASKS" ]; then
-            aws ecs describe-tasks --cluster pce-dev-cluster --tasks $TASKS --query "tasks[].{TaskArn:taskArn,StoppedReason:stoppedReason,ContainerReason:containers[0].reason}" --output table
-          else
-            echo "✅ No stopped tasks found"
-          fi
